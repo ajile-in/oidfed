@@ -1,0 +1,59 @@
+{
+	"name": "@oidfed/did",
+	"version": "0.1.0",
+	"description": "Pluggable DID method drivers for blockchain-anchored identifiers — hedera, hiero, polygon. Provides DID resolution, document validation, and JWK extraction for OpenID Federation trust integration.",
+	"license": "Apache-2.0",
+	"author": "Justin Dah-kenangnon <dah.kenangnon@gmail.com>",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/Dahkenangnon/oidfed.git",
+		"directory": "packages/did"
+	},
+	"homepage": "https://github.com/Dahkenangnon/oidfed/tree/main/packages/did#readme",
+	"bugs": {
+		"url": "https://github.com/Dahkenangnon/oidfed/issues"
+	},
+	"keywords": [
+		"openid",
+		"federation",
+		"did",
+		"hedera",
+		"hiero",
+		"polygon",
+		"decentralized-identifier",
+		"jwk"
+	],
+	"type": "module",
+	"main": "./dist/index.cjs",
+	"module": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js",
+			"require": "./dist/index.cjs"
+		}
+	},
+	"files": [
+		"dist",
+		"LICENSE",
+		"NOTICE"
+	],
+	"sideEffects": false,
+	"publishConfig": {
+		"access": "public"
+	},
+	"scripts": {
+		"build": "tsup",
+		"typecheck": "tsc --noEmit",
+		"clean": "rm -rf dist"
+	},
+	"peerDependencies": {
+		"@oidfed/core": "workspace:^"
+	},
+	"peerDependenciesMeta": {
+		"@oidfed/core": {
+			"optional": false
+		}
+	}
+}

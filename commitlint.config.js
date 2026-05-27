@@ -27,6 +27,7 @@ export default {
 				"leaf",
 				"oidc",
 				"cli",
+				"did",
 				"explorer",
 				"home",
 				"learn",

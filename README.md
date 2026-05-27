@@ -46,10 +46,69 @@ The complete [OpenID Federation 1.0](https://openid.net/specs/openid-federation-
 | `@oidfed/authority` | Trust Anchor and Intermediate Authority operations — subordinate management, statement issuance, federation endpoint serving, and policy enforcement | Trust Anchor or Intermediate Authority | [docs/packages/authority.md](docs/packages/authority.md) |
 | `@oidfed/leaf` | Leaf Entity toolkit — Entity Configuration serving, authority discovery, and trust chain participation for any entity at the edge of an OpenID Federation | Relying Party | [docs/packages/leaf.md](docs/packages/leaf.md) |
 | `@oidfed/oidc` | OpenID Connect and OAuth 2.0 federation flows — automatic and explicit client registration, Request Object validation, and RP/OP metadata processing as defined in OpenID Federation 1.0 | OP or RP | [docs/packages/oidc.md](docs/packages/oidc.md) |
+| `@oidfed/did` | Pluggable DID method drivers for blockchain-anchored identifiers — hedera, hiero, polygon. DID resolution, document validation, and JWK extraction for federation trust integration. | Any federation participant integrating DIDs | [docs/packages/did.md](docs/packages/did.md) |
 
 For integration examples, see the [Wiring Guide](docs/guide/wiring-guide.md). For production storage backends (PostgreSQL, MongoDB, Redis) and HSM key stores, see the [Storage Guide](docs/guide/storage-guide.md). To run a full multi-topology federation locally with wildcard DNS and TLS, see the [Dev Guide](docs/guide/dev.md) and [E2E Test infrastructure](docs/test/e2e.md).
 
 The repository also ships a CLI ([`@oidfed/cli`](docs/tools/cli.md)), a live federation explorer at [explore.oidfed.com](https://explore.oidfed.com), an interactive course at [learn.oidfed.com](https://learn.oidfed.com), and a few internal packages that support the workspace — browse the source or the [docs/](docs/) directory to learn more.
+
+## DID Method Support
+
+`@oidfed/did` provides pluggable drivers for blockchain-anchored DID methods, enabling federation participants to resolve, validate, and extract signing keys from decentralized identifiers — without coupling federation logic to any blockchain.
+
+```ts
+import { createDefaultRegistry, DIDDriverRegistry } from "@oidfed/did";
+import { HederaDIDDriver, HieroDIDDriver, PolygonDIDDriver } from "@oidfed/did";
+
+// Registry with all built-in drivers
+const registry = createDefaultRegistry({
+  hedera: {},
+  hiero: { network: "enterprise" },
+  polygon: { rpcUrl: "https://polygon-rpc.com" },
+});
+
+// Resolve a DID document
+const doc = await registry
+  .getForDid("did:hedera:mainnet:0.0.12345")
+  .resolve("did:hedera:mainnet:0.0.12345");
+
+// Extract signing keys as JWK[] — ready for federation use
+const keys = await registry
+  .getForDid("did:polygon:polygon-mainnet:0xabc…")
+  .getSigningKeys("did:polygon:polygon-mainnet:0xabc…");
+
+// Validate a DID
+const valid = await registry
+  .getForDid("did:hiero:mainnet:enterprise:alice")
+  .validate("did:hiero:mainnet:enterprise:alice");
+```
+
+### Plug a custom DID method
+
+```ts
+import { DIDDriverRegistry, type DIDMethodDriver, type DIDDocument } from "@oidfed/did";
+import type { JWK } from "@oidfed/core";
+
+class MyCustomDriver implements DIDMethodDriver {
+  method(): string { return "my-method"; }
+  async resolve(did: string): Promise<DIDDocument> { /* … */ }
+  async validate(did: string): Promise<boolean> { /* … */ }
+  async getSigningKeys(did: string): Promise<JWK[]> { /* … */ }
+  supportsAnchoring(): boolean { return false; }
+}
+
+const registry = new DIDDriverRegistry([new MyCustomDriver()]);
+```
+
+### Drivers
+
+| Driver | Method | Use Case |
+|--------|--------|----------|
+| `HederaDIDDriver` | `did:hedera` | Public Hedera Network — mirror node REST API resolution, HCS-based DIDs |
+| `HieroDIDDriver` | `did:hiero` | LF Hyperledger Hiero permissioned ledgers — governance-aware metadata, sovereign/enterprise federation |
+| `PolygonDIDDriver` | `did:polygon` | Polygon/EVM ecosystem — Universal Resolver + JSON-RPC fallback, EVM-compatible signatures |
+
+For the full API reference see [docs/packages/did.md](docs/packages/did.md).
 
 ## Related Specifications
 
@@ -89,7 +148,7 @@ To report a vulnerability, email **dah.kenangnon@gmail.com** — see [SECURITY.m
 
 @oidfed is dual-licensed by component:
 
-- **Libraries** — `@oidfed/core`, `@oidfed/authority`, `@oidfed/leaf`, `@oidfed/oidc`, `@oidfed/cli` — released under [Apache License 2.0](LICENSE).
+- **Libraries** — `@oidfed/core`, `@oidfed/authority`, `@oidfed/leaf`, `@oidfed/oidc`, `@oidfed/did`, `@oidfed/cli` — released under [Apache License 2.0](LICENSE).
 - **Apps & internal UI** — `@oidfed/explorer`, `@oidfed/home`, `@oidfed/learn`, `@oidfed/ui` — released under MIT. See each component's own `LICENSE` (e.g. `apps/home/LICENSE`).
 
 The repository root is governed by the Apache 2.0 `LICENSE` file. Apps and internal packages override this with their own MIT `LICENSE` file. Refer to the `LICENSE` in the nearest parent directory of any file to determine its license.

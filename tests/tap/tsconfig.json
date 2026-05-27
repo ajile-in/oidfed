@@ -7,7 +7,8 @@
 			"@oidfed/core": ["../../packages/core/src/index.ts"],
 			"@oidfed/authority": ["../../packages/authority/src/index.ts"],
 			"@oidfed/leaf": ["../../packages/leaf/src/index.ts"],
-			"@oidfed/oidc": ["../../packages/oidc/src/index.ts"]
+			"@oidfed/oidc": ["../../packages/oidc/src/index.ts"],
+			"@oidfed/did": ["../../packages/did/src/index.ts"]
 		},
 		"rootDir": "../..",
 		"noEmit": true
