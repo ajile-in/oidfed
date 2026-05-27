@@ -2,35 +2,121 @@ import type { JWK } from "@oidfed/core";
 import type { DIDMethodDriver } from "../../driver.js";
 import { DIDResolutionError, DIDValidationError } from "../../errors.js";
 import type { DIDDocument, DIDDriverConfig } from "../../types.js";
-import { extractSigningKeys, isValidDid, parseDid } from "../../utils.js";
+import { extractSigningKeys } from "../../utils.js";
 
 const POLYGON_METHOD = "polygon";
 
-const DEFAULT_NETWORK = "polygon-mainnet";
+const POLYGON_DID_REGEX = /^did:polygon(:testnet)?:0x[0-9a-fA-F]{40}$/;
 
-const POLYGON_RPC_ENDPOINTS: Record<string, string> = {
-	"polygon-mainnet": "https://polygon-rpc.com",
-	"polygon-amoy": "https://rpc-amoy.polygon.technology",
+interface NetworkEntry {
+	URL: string;
+	CONTRACT_ADDRESS: string;
+}
+
+const networkConfig: Record<string, NetworkEntry> = {
+	testnet: {
+		URL: "https://rpc-amoy.polygon.technology",
+		CONTRACT_ADDRESS: "0xcB80F37eDD2bE3570c6C9D5B0888614E04E1e49E",
+	},
+	mainnet: {
+		URL: "https://polygon.drpc.org",
+		CONTRACT_ADDRESS: "0x0C16958c4246271622201101C83B9F0Fc7180d15",
+	},
 };
 
+function getNetworkFromDid(did: string): "testnet" | "mainnet" {
+	return did.split(":")[2] === "testnet" ? "testnet" : "mainnet";
+}
+
+function getDidAddress(did: string): string {
+	const parts = did.split(":");
+	return parts[2] === "testnet" ? (parts[3] ?? "") : (parts[2] ?? "");
+}
+
+function validateDidFormat(did: string): boolean {
+	return POLYGON_DID_REGEX.test(did);
+}
+
+// getDIDDoc(address) function selector
+const GET_DID_DOC_SELECTOR = "0xb7797527";
+
+function encodeGetDIDDoc(address: string): string {
+	const addr = address.replace("0x", "").toLowerCase().padStart(64, "0");
+	return `${GET_DID_DOC_SELECTOR}${addr}`;
+}
+
+function hexToBytes(hex: string): Uint8Array {
+	const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
+	const bytes = new Uint8Array(clean.length / 2);
+	for (let i = 0; i < bytes.length; i++) {
+		bytes[i] = Number.parseInt(clean.slice(i * 2, i * 2 + 2), 16);
+	}
+	return bytes;
+}
+
+function readWord(data: Uint8Array, offset: number): bigint {
+	let result = 0n;
+	for (let i = 0; i < 32; i++) {
+		result = (result << 8n) | BigInt(data[offset + i] ?? 0);
+	}
+	return result;
+}
+
+function readAsNumber(data: Uint8Array, offset: number): number {
+	const n = readWord(data, offset);
+	if (n > BigInt(Number.MAX_SAFE_INTEGER)) {
+		throw new Error(`ABI value too large: ${n}`);
+	}
+	return Number(n);
+}
+
+function decodeAbiString(data: Uint8Array, baseOffset: number): string {
+	const len = readAsNumber(data, baseOffset);
+	const bytes = data.slice(baseOffset + 32, baseOffset + 32 + len);
+	return new TextDecoder().decode(bytes);
+}
+
+function decodeGetDIDDocResult(hex: string): [string, string[]] {
+	const data = hexToBytes(hex);
+
+	// ABI-encoded tuple(string, string[]):
+	//   offset_0 (32 bytes) -> string data
+	//   offset_1 (32 bytes) -> string[] data
+	const offset0 = readAsNumber(data, 0);
+	const offset1 = readAsNumber(data, 32);
+
+	const didDocString = decodeAbiString(data, offset0);
+
+	// Decode string[] at offset1
+	const arrLen = readAsNumber(data, offset1);
+	const arrBase = offset1 + 32;
+	const resources: string[] = [];
+	for (let i = 0; i < arrLen; i++) {
+		const elemOffset = readAsNumber(data, arrBase + i * 32);
+		resources.push(decodeAbiString(data, arrBase + elemOffset));
+	}
+
+	return [didDocString, resources];
+}
+
 /**
- * DID method driver for `did:polygon` — the Polygon/EVM DID method.
+ * DID method driver for `did:polygon` — EVM-based DID method on Polygon.
  *
- * Resolves DID documents from on-chain DID registry contracts or
- * from an off-chain Universal Resolver endpoint.
+ * Resolves DID documents from on-chain DID registry contracts via
+ * `eth_call` against a Polygon RPC endpoint.
  *
- * DID format: `did:polygon:{network}:{contractAddress}:{tokenId}`
- *           or `did:polygon:{network}:{address}`
+ * DID format: `did:polygon:0x{40}` (mainnet)
+ *           or `did:polygon:testnet:0x{40}` (testnet/amoy)
  *
- * @see https://github.com/0xPolygonID/did-method
+ * @see https://github.com/ayanworks/polygon-did-modules
  */
 export class PolygonDIDDriver implements DIDMethodDriver {
-	private readonly endpoints: Record<string, string>;
 	private readonly rpcUrl: string | undefined;
+	private readonly contractAddress: string | undefined;
 
 	constructor(config?: DIDDriverConfig) {
-		this.endpoints = config?.endpoints ?? {};
-		this.rpcUrl = config?.rpcUrl;
+		this.rpcUrl = config?.rpcUrl ?? undefined;
+		this.contractAddress = (config?.contractAddress as string | undefined) ?? undefined;
 	}
 
 	method(): string {
@@ -38,133 +124,26 @@ export class PolygonDIDDriver implements DIDMethodDriver {
 	}
 
 	async resolve(did: string): Promise<DIDDocument> {
-		const [, methodSpecificId] = this.ensureParsed(did);
-		const { network, contractAddress, identifier } = this.parseAddress(methodSpecificId);
-
-		// Try Universal Resolver first (off-chain, no RPC call)
-		const doc = await this.tryUniversalResolver(did);
-		if (doc) return doc;
-
-		// Fall back to on-chain resolution via RPC
-		return await this.resolveFromChain(did, network, contractAddress, identifier);
-	}
-
-	async validate(did: string): Promise<boolean> {
-		if (!isValidDid(did)) return false;
-
-		try {
-			await this.resolve(did);
-			return true;
-		} catch {
-			return false;
-		}
-	}
-
-	async getSigningKeys(did: string): Promise<JWK[]> {
-		const doc = await this.resolve(did);
-		return extractSigningKeys(doc);
-	}
-
-	supportsAnchoring(): boolean {
-		return true;
-	}
-
-	private ensureParsed(did: string): [string, string] {
-		const [method, id] = parseDid(did);
-		if (method !== POLYGON_METHOD) {
-			throw new DIDValidationError(did, `Expected method "${POLYGON_METHOD}" but got "${method}"`);
-		}
-		return [method, id];
-	}
-
-	/**
-	 * Parse `{network}:{contractAddress}:{identifier}` from the
-	 * method-specific identifier.
-	 */
-	private parseAddress(methodSpecificId: string): {
-		network: string;
-		contractAddress: string;
-		identifier: string;
-	} {
-		const parts = methodSpecificId.split(":");
-
-		if (parts.length >= 3) {
-			// polygon:{network}:{contract}:{id}
-			return {
-				network: parts[0] ?? DEFAULT_NETWORK,
-				contractAddress: parts[1] ?? methodSpecificId,
-				identifier: parts.slice(2).join(":"),
-			};
-		}
-
-		if (parts.length === 2) {
-			// polygon:{network}:{address}
-			return {
-				network: parts[0] ?? DEFAULT_NETWORK,
-				contractAddress: parts[1] ?? methodSpecificId,
-				identifier: "",
-			};
-		}
-
-		// polygon:{address} — default to mainnet
-		return {
-			network: DEFAULT_NETWORK,
-			contractAddress: methodSpecificId,
-			identifier: "",
-		};
-	}
-
-	private resolveEndpoint(network: string): string {
-		return this.endpoints[network] ?? POLYGON_RPC_ENDPOINTS[network] ?? "";
-	}
-
-	private async tryUniversalResolver(did: string): Promise<DIDDocument | undefined> {
-		const universalResolverUrl =
-			this.endpoints["universal-resolver"] ?? "https://dev.uniresolver.io";
-
-		try {
-			const response = await fetch(
-				`${universalResolverUrl}/1.0/identifiers/${encodeURIComponent(did)}`,
-				{
-					headers: { Accept: "application/did+json" },
-				},
+		if (!validateDidFormat(did)) {
+			throw new DIDValidationError(
+				did,
+				`Invalid did:polygon format — expected did:polygon[:testnet]:0x{40}`,
 			);
-
-			if (!response.ok) return undefined;
-
-			const body = (await response.json()) as Record<string, unknown>;
-			const doc = (body.didDocument ?? body) as Record<string, unknown>;
-
-			if (doc.id) {
-				return doc as unknown as DIDDocument;
-			}
-			return undefined;
-		} catch {
-			return undefined;
 		}
-	}
 
-	/**
-	 * Resolve a DID document by calling an EVM-compatible RPC endpoint.
-	 * Uses `eth_call` against a DID registry contract.
-	 *
-	 * NOTE: This is a resolution abstraction only — no smart contracts are
-	 * deployed or modified. The caller must provide a valid registry
-	 * contract address.
-	 */
-	private async resolveFromChain(
-		did: string,
-		network: string,
-		contractAddress: string,
-		identifier: string,
-	): Promise<DIDDocument> {
-		const rpc = this.rpcUrl ?? this.resolveEndpoint(network);
+		const network = getNetworkFromDid(did);
+		const didAddress = getDidAddress(did);
+		const rpc = this.rpcUrl ?? networkConfig[network]?.URL;
+		const contractAddr = this.contractAddress ?? networkConfig[network]?.CONTRACT_ADDRESS;
+
 		if (!rpc) {
-			throw new DIDResolutionError(did, `No RPC endpoint configured for network "${network}"`);
+			throw new DIDResolutionError(did, `No RPC endpoint available for network "${network}"`);
+		}
+		if (!contractAddr) {
+			throw new DIDResolutionError(did, `No contract address available for network "${network}"`);
 		}
 
-		// Build the eth_call payload to query the DID registry
-		const data = this.encodeRegistryCall(contractAddress, identifier || contractAddress);
+		const data = encodeGetDIDDoc(didAddress);
 
 		const payload = {
 			jsonrpc: "2.0",
@@ -172,7 +151,7 @@ export class PolygonDIDDriver implements DIDMethodDriver {
 			method: "eth_call",
 			params: [
 				{
-					to: contractAddress.startsWith("0x") ? contractAddress : `0x${contractAddress}`,
+					to: contractAddr,
 					data,
 				},
 				"latest",
@@ -205,16 +184,25 @@ export class PolygonDIDDriver implements DIDMethodDriver {
 			throw new DIDResolutionError(did, `RPC error: ${JSON.stringify(json.error)}`);
 		}
 
-		// Decode the hex result to a string
 		const hexResult = json.result as string | undefined;
 		if (!hexResult || hexResult === "0x") {
-			throw new DIDResolutionError(did, "No DID document found at the given contract address");
+			throw new DIDResolutionError(did, "No DID document found on chain");
 		}
 
-		const docJson = this.decodeHexString(hexResult);
+		let didDocString: string;
+		try {
+			didDocString = decodeGetDIDDocResult(hexResult)[0];
+		} catch (cause) {
+			throw new DIDValidationError(did, `Failed to decode RPC result: ${String(cause)}`);
+		}
+
+		if (!didDocString) {
+			throw new DIDResolutionError(did, "No DID document found on chain");
+		}
+
 		let doc: Record<string, unknown>;
 		try {
-			doc = JSON.parse(docJson) as Record<string, unknown>;
+			doc = JSON.parse(didDocString) as Record<string, unknown>;
 		} catch {
 			throw new DIDValidationError(did, "On-chain DID document is not valid JSON");
 		}
@@ -226,31 +214,16 @@ export class PolygonDIDDriver implements DIDMethodDriver {
 		return doc as unknown as DIDDocument;
 	}
 
-	/**
-	 * Build an ABI-encoded `resolveDID(address)` call data.
-	 * Uses the method selector `0x2b6c3f26` (keccak256("resolveDID(address)")[0:4]).
-	 */
-	private encodeRegistryCall(_contract: string, identity: string): string {
-		// Method selector for resolveDID(address)
-		const selector = "0x2b6c3f26";
-		// Pad the address to 32 bytes (ABI encoding)
-		const addr = identity.replace("0x", "").toLowerCase().padStart(64, "0");
-		return `${selector}${addr}`;
+	async validate(did: string): Promise<boolean> {
+		return validateDidFormat(did);
 	}
 
-	/**
-	 * Decode a hex string from an RPC response, stripping the leading
-	 * "0x" and treating the rest as a UTF-8 string.
-	 */
-	private decodeHexString(hex: string): string {
-		const clean = hex.startsWith("0x") ? hex.slice(2) : hex;
-		const bytes: number[] = [];
-		for (let i = 0; i < clean.length; i += 2) {
-			const byte = Number.parseInt(clean.slice(i, i + 2), 16);
-			if (!Number.isNaN(byte)) {
-				bytes.push(byte);
-			}
-		}
-		return new TextDecoder().decode(new Uint8Array(bytes));
+	async getSigningKeys(did: string): Promise<JWK[]> {
+		const doc = await this.resolve(did);
+		return extractSigningKeys(doc);
+	}
+
+	supportsAnchoring(): boolean {
+		return true;
 	}
 }

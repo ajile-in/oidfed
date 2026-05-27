@@ -7,6 +7,7 @@ import {
 	DIDError,
 	type DIDMethodDriver,
 	DIDResolutionError,
+	DIDValidationError,
 	extractSigningKeys,
 	HederaDIDDriver,
 	HieroDIDDriver,
@@ -152,10 +153,26 @@ export default (QUnit: QUnit) => {
 			t.equal(id, "mainnet:enterprise:alice", "method-specific id is correct");
 		});
 
-		test("parses a valid did:polygon DID", (t) => {
-			const [method, id] = parseDid("did:polygon:polygon-mainnet:0xContract:0xTokenId");
+		test("parses a valid did:polygon DID (mainnet)", (t) => {
+			const [method, id] = parseDid("did:polygon:0x1234567890abcdef1234567890abcdef12345678");
 			t.equal(method, "polygon", "method is polygon");
-			t.equal(id, "polygon-mainnet:0xContract:0xTokenId", "method-specific id is correct");
+			t.equal(
+				id,
+				"0x1234567890abcdef1234567890abcdef12345678",
+				"method-specific id is the address",
+			);
+		});
+
+		test("parses a valid did:polygon DID (testnet)", (t) => {
+			const [method, id] = parseDid(
+				"did:polygon:testnet:0x1234567890abcdef1234567890abcdef12345678",
+			);
+			t.equal(method, "polygon", "method is polygon");
+			t.equal(
+				id,
+				"testnet:0x1234567890abcdef1234567890abcdef12345678",
+				"method-specific id includes testnet prefix",
+			);
 		});
 
 		test("throws on empty string", (t) => {
@@ -184,7 +201,7 @@ export default (QUnit: QUnit) => {
 		test("returns true for valid DIDs", (t) => {
 			t.true(isValidDid("did:hedera:mainnet:0.0.12345"));
 			t.true(isValidDid("did:hiero:testnet:enterprise:bob"));
-			t.true(isValidDid("did:polygon:amoy:0xabc"));
+			t.true(isValidDid("did:polygon:0x1234567890abcdef1234567890abcdef12345678"));
 		});
 
 		test("returns false for invalid strings", (t) => {
@@ -481,6 +498,23 @@ export default (QUnit: QUnit) => {
 			const d = new PolygonDIDDriver();
 			t.false(await d.validate(""));
 			t.false(await d.validate("bad"));
+		});
+
+		test("validate returns true for valid format (no network call)", async (t) => {
+			const d = new PolygonDIDDriver();
+			t.true(await d.validate("did:polygon:0x1234567890abcdef1234567890abcdef12345678"));
+			t.true(await d.validate("did:polygon:testnet:0x1234567890abcdef1234567890abcdef12345678"));
+		});
+
+		test("resolve throws DIDValidationError for invalid format", async (t) => {
+			const d = new PolygonDIDDriver();
+			try {
+				await d.resolve("did:polygon:not-an-address");
+				t.false(true, "should have thrown");
+			} catch (e) {
+				t.true(e instanceof DIDError, "DIDError thrown");
+				t.true(e instanceof DIDValidationError, "DIDValidationError thrown");
+			}
 		});
 
 		test("accepts optional config with rpcUrl", (t) => {
